@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: byteme
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run preview
+    envVars:
+      - key: NODE_ENV
+        value: production
