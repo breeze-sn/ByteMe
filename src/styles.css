@@ -232,3 +232,104 @@ a {
   text-transform: uppercase;
   opacity: 0.8;
 }
+
+/* Mobile Responsive Styles */
+@media (max-width: 768px) {
+  .camera-topbar,
+  .camera-bottom {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .camera-title {
+    font-size: 0.9rem;
+  }
+
+  .button {
+    min-height: 44px;
+    padding: 0 16px;
+    font-size: 0.9rem;
+  }
+
+  .capture-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .capture-button svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .camera-status,
+  .camera-hint,
+  .eyebrow {
+    font-size: 0.75rem;
+  }
+
+  .ascii-view {
+    font-size: 1.2vmin;
+  }
+
+  .camera-bottom-row {
+    gap: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .camera-topbar,
+  .camera-bottom {
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .camera-title {
+    font-size: 0.8rem;
+  }
+
+  .button {
+    min-height: 40px;
+    padding: 0 14px;
+    font-size: 0.85rem;
+  }
+
+  .capture-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .capture-button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .camera-status,
+  .camera-hint,
+  .eyebrow {
+    font-size: 0.7rem;
+  }
+
+  .ascii-view {
+    font-size: 1vmin;
+  }
+
+  .camera-bottom-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .camera-actions {
+    grid-column: 1;
+    justify-self: start;
+  }
+
+  .capture-button {
+    justify-self: center;
+  }
+
+  .camera-hint {
+    grid-column: 1;
+    justify-self: start;
+    text-align: left;
+  }
+}
