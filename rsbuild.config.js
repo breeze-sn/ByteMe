@@ -11,4 +11,7 @@ export default defineConfig({
   html: {
     title: "ByteMe",
   },
+  output: {
+    assetPrefix: "/ByteMe/",
+  },
 });
