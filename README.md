@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # ByteMe
 
 A modern React application using JavaScript and Rsbuild.
