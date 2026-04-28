@@ -4,6 +4,7 @@
   "private": true,
   "description": "React app scaffolded with Rsbuild",
   "scripts": {
+    "start": "rsbuild dev",
     "dev": "rsbuild dev",
     "build": "rsbuild build",
     "preview": "rsbuild preview"
@@ -13,6 +14,12 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@mediapipe/hands": "^0.4.1675469240",
+    "@mediapipe/pose": "^0.5.1675469404",
+    "@tensorflow-models/body-pix": "^2.2.1",
+    "@tensorflow-models/hand-pose-detection": "^2.0.1",
+    "@tensorflow-models/pose-detection": "^2.1.3",
+    "@tensorflow/tfjs": "^4.22.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
