@@ -33,7 +33,7 @@ export default function App() {
     }
 
     setCameraState("idle");
-    setAsciiArt("Camera stopped. Start again to resume ASCII art.");
+    setAsciiArt("Camera stopped. Start Again.");
   };
 
   const capturePicture = async () => {
@@ -114,7 +114,7 @@ export default function App() {
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const fileName = `byteme-capture-${timestamp}.png`;
+      const fileName = `ByteME-${timestamp}.png`;
 
       try {
         if (window.showSaveFilePicker) {
@@ -142,7 +142,7 @@ export default function App() {
         URL.revokeObjectURL(downloadUrl);
       } catch (error) {
         console.error("Capture save failed:", error);
-        setCameraError("Could not save the captured image.");
+        setCameraError("Could not save the image.");
       }
     }, "image/png");
   };
