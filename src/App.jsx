@@ -1,6 +1,121 @@
 import { useEffect, useRef, useState } from "react";
 import * as tf from "@tensorflow/tfjs";
-import * as bodyPix from "@tensorflow-models/body-pix";
+import * as faceLandmarksDetection from "@tensorflow-models/face-landmarks-detection";
+import * as handPoseDetection from "@tensorflow-models/hand-pose-detection";
+
+const ASCII_PALETTE = "@#S%?*+;:,. ";
+const TARGET_COLUMNS = 200;
+
+const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
+
+const createBoxPolygon = (left, top, right, bottom) => [
+  { x: left, y: top },
+  { x: right, y: top },
+  { x: right, y: bottom },
+  { x: left, y: bottom },
+];
+
+const getPointsBounds = (points) => {
+  if (!points.length) {
+    return null;
+  }
+
+  return points.reduce(
+    (bounds, point) => ({
+      minX: Math.min(bounds.minX, point.x),
+      minY: Math.min(bounds.minY, point.y),
+      maxX: Math.max(bounds.maxX, point.x),
+      maxY: Math.max(bounds.maxY, point.y),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY,
+    },
+  );
+};
+
+const createExpandedRegion = (points, width, height, paddingRatio) => {
+  const bounds = getPointsBounds(points);
+
+  if (!bounds) {
+    return null;
+  }
+
+  const regionWidth = bounds.maxX - bounds.minX;
+  const regionHeight = bounds.maxY - bounds.minY;
+  const paddingX = Math.max(24, regionWidth * paddingRatio);
+  const paddingY = Math.max(24, regionHeight * paddingRatio);
+
+  return createBoxPolygon(
+    clamp(bounds.minX - paddingX, 0, width - 1),
+    clamp(bounds.minY - paddingY, 0, height - 1),
+    clamp(bounds.maxX + paddingX, 0, width - 1),
+    clamp(bounds.maxY + paddingY, 0, height - 1),
+  );
+};
+
+const buildConvexHull = (points) => {
+  if (points.length <= 3) {
+    return points;
+  }
+
+  const sortedPoints = [...points].sort((left, right) => {
+    if (left.x === right.x) {
+      return left.y - right.y;
+    }
+
+    return left.x - right.x;
+  });
+
+  const cross = (origin, left, right) =>
+    (left.x - origin.x) * (right.y - origin.y) - (left.y - origin.y) * (right.x - origin.x);
+
+  const lowerHull = [];
+  for (const point of sortedPoints) {
+    while (lowerHull.length >= 2 && cross(lowerHull[lowerHull.length - 2], lowerHull[lowerHull.length - 1], point) <= 0) {
+      lowerHull.pop();
+    }
+    lowerHull.push(point);
+  }
+
+  const upperHull = [];
+  for (let index = sortedPoints.length - 1; index >= 0; index -= 1) {
+    const point = sortedPoints[index];
+    while (upperHull.length >= 2 && cross(upperHull[upperHull.length - 2], upperHull[upperHull.length - 1], point) <= 0) {
+      upperHull.pop();
+    }
+    upperHull.push(point);
+  }
+
+  lowerHull.pop();
+  upperHull.pop();
+
+  return lowerHull.concat(upperHull);
+};
+
+const isPointInPolygon = (x, y, polygon) => {
+  if (polygon.length < 3) {
+    return false;
+  }
+
+  let inside = false;
+
+  for (let currentIndex = 0, previousIndex = polygon.length - 1; currentIndex < polygon.length; previousIndex = currentIndex, currentIndex += 1) {
+    const currentPoint = polygon[currentIndex];
+    const previousPoint = polygon[previousIndex];
+    const intersects =
+      currentPoint.y > y !== previousPoint.y > y &&
+      x < ((previousPoint.x - currentPoint.x) * (y - currentPoint.y)) / (previousPoint.y - currentPoint.y) + currentPoint.x;
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+};
 
 export default function App() {
   const videoRef = useRef(null);
@@ -8,14 +123,12 @@ export default function App() {
   const streamRef = useRef(null);
   const frameRef = useRef(0);
   const isProcessingRef = useRef(false);
-  const frameTickRef = useRef(0);
-  const modelRef = useRef(null);
+  const faceDetectorRef = useRef(null);
+  const handDetectorRef = useRef(null);
+  const lastAsciiRef = useRef("");
   const [cameraState, setCameraState] = useState("idle");
   const [cameraError, setCameraError] = useState("");
-  const [modelReady, setModelReady] = useState(false);
   const [asciiArt, setAsciiArt] = useState("Loading AI model...");
-
-  const asciiPalette = "@#S%?*+;:,. ";
 
   const stopCamera = () => {
     if (frameRef.current) {
@@ -34,6 +147,7 @@ export default function App() {
 
     setCameraState("idle");
     setAsciiArt("Camera stopped. Start Again.");
+    lastAsciiRef.current = "";
   };
 
   const capturePicture = async () => {
@@ -135,11 +249,15 @@ export default function App() {
         }
 
         const downloadUrl = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = downloadUrl;
-        link.download = fileName;
-        link.click();
-        URL.revokeObjectURL(downloadUrl);
+        try {
+          const link = document.createElement("a");
+          link.href = downloadUrl;
+          link.download = fileName;
+          link.rel = "noreferrer";
+          link.click();
+        } finally {
+          window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+        }
       } catch (error) {
         console.error("Capture save failed:", error);
         setCameraError("Could not save the image.");
@@ -150,9 +268,10 @@ export default function App() {
   const renderAsciiFrame = async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const model = modelRef.current;
+    const faceDetector = faceDetectorRef.current;
+    const handDetector = handDetectorRef.current;
 
-    if (!video || !canvas || video.readyState < 2 || !model) {
+    if (!video || !canvas || video.readyState < 2 || (!faceDetector && !handDetector)) {
       frameRef.current = requestAnimationFrame(renderAsciiFrame);
       return;
     }
@@ -163,8 +282,6 @@ export default function App() {
     }
 
     isProcessingRef.current = true;
-    frameTickRef.current += 1;
-
     const context = canvas.getContext("2d", { willReadFrequently: true });
 
     if (!context) {
@@ -173,9 +290,8 @@ export default function App() {
       return;
     }
 
-    // Calculate columns to fill screen width
-    const targetColumns = 200; // wider ASCII for full screen
-    
+    const targetColumns = TARGET_COLUMNS;
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
@@ -183,41 +299,50 @@ export default function App() {
     const fullPixelData = context.getImageData(0, 0, video.videoWidth, video.videoHeight).data;
 
     try {
-      const segmentationPromise = model.segmentPersonParts(video, {
-        flipHorizontal: false,
-        internalResolution: "low",
-        segmentationThreshold: 0.5,
-      });
+      const facePolygons = [];
+      const handPolygons = [];
 
-      const segmentation = await segmentationPromise;
-
-      if (!segmentation) {
-        console.warn("No body-part segmentation object");
-        frameRef.current = requestAnimationFrame(renderAsciiFrame);
-        return;
-      }
-
-      const segmentationData = segmentation.data;
       const videoWidth = video.videoWidth;
       const videoHeight = video.videoHeight;
       const aspectRatio = videoHeight / videoWidth;
+
+      if (faceDetector) {
+        const faces = await faceDetector.estimateFaces(video, {
+          flipHorizontal: false,
+        });
+
+        for (const face of faces) {
+          const facePoints = face.keypoints.filter(
+            (keypoint) => Number.isFinite(keypoint.x) && Number.isFinite(keypoint.y),
+          );
+
+          const faceRegion = createExpandedRegion(facePoints, videoWidth, videoHeight, 0.6);
+
+          if (faceRegion) {
+            facePolygons.push(faceRegion);
+          }
+        }
+      }
+
+      if (handDetector) {
+        const hands = await handDetector.estimateHands(video);
+
+        for (const hand of hands) {
+          const handPoints = hand.keypoints.filter(
+            (keypoint) => Number.isFinite(keypoint.x) && Number.isFinite(keypoint.y),
+          );
+
+          const handRegion = createExpandedRegion(handPoints, videoWidth, videoHeight, 0.45);
+
+          if (handRegion) {
+            handPolygons.push(handRegion);
+          }
+        }
+      }
       
       // Calculate rows based on fixed columns and camera aspect ratio
       const targetRows = Math.round(targetColumns * aspectRatio * 0.5);
 
-      if (!segmentationData || segmentationData.length === 0) {
-        console.warn("Empty segmentation data", {
-          dataLength: segmentationData?.length,
-          videoSize: `${videoWidth}x${videoHeight}`,
-        });
-        frameRef.current = requestAnimationFrame(renderAsciiFrame);
-        return;
-      }
-
-      // Calculate mask dimensions based on data length
-      const maskArea = segmentationData.length;
-      const maskWidth = Math.sqrt(maskArea / aspectRatio);
-      const maskHeight = maskArea / maskWidth;
       let ascii = "";
       let personPixelCount = 0;
 
@@ -225,18 +350,14 @@ export default function App() {
         let line = "";
 
         for (let col = 0; col < targetColumns; col += 1) {
-          // Map from target grid to mask dimensions (mirrored)
-          const maskRow = Math.floor((row / targetRows) * maskHeight);
           const mirroredCol = targetColumns - 1 - col;
-          const maskCol = Math.floor((mirroredCol / targetColumns) * maskWidth);
-          const maskIndex = maskRow * Math.floor(maskWidth) + maskCol;
-
-          // Map from target grid to video dimensions for pixel data (mirrored)
           const videoRow = Math.floor((row / targetRows) * videoHeight);
           const videoCol = Math.floor((mirroredCol / targetColumns) * videoWidth);
           const videoIndex = videoRow * videoWidth + videoCol;
 
-          const isHumanPixel = segmentationData[maskIndex] !== -1;
+          const isFacePixel = facePolygons.some((polygon) => isPointInPolygon(videoCol, videoRow, polygon));
+          const isHandPixel = handPolygons.some((polygon) => isPointInPolygon(videoCol, videoRow, polygon));
+          const isHumanPixel = isFacePixel || isHandPixel;
 
           if (isHumanPixel) personPixelCount += 1;
 
@@ -249,11 +370,11 @@ export default function App() {
             const blue = fullPixelData[pixelIndex + 2];
             const brightness = (red * 0.299 + green * 0.587 + blue * 0.114) / 255;
             const paletteIndex = Math.min(
-              asciiPalette.length - 1,
-              Math.floor((1 - brightness) * (asciiPalette.length - 1)),
+              ASCII_PALETTE.length - 1,
+              Math.floor((1 - brightness) * (ASCII_PALETTE.length - 1)),
             );
 
-            line += asciiPalette[paletteIndex];
+            line += ASCII_PALETTE[paletteIndex];
           }
         }
 
@@ -261,7 +382,10 @@ export default function App() {
       }
 
       if (ascii.trim()) {
+        lastAsciiRef.current = ascii;
         setAsciiArt(ascii);
+      } else if (lastAsciiRef.current) {
+        setAsciiArt(lastAsciiRef.current);
       }
     } catch (error) {
       console.error("Segmentation error:", error);
@@ -312,28 +436,62 @@ export default function App() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     const loadModel = async () => {
       try {
-        console.log("Loading body-pix model...");
-        const model = await bodyPix.load({
-          architecture: "MobileNetV1",
-          outputStride: 16,
-          multiplier: 0.75,
-          quantBytes: 2,
-        });
+        await tf.setBackend("webgl");
+        await tf.ready();
 
-        modelRef.current = model;
-        setModelReady(true);
+        console.log("Loading face-landmarks detector...");
+        const detector = await faceLandmarksDetection.createDetector(
+          faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+          {
+            runtime: "tfjs",
+            refineLandmarks: true,
+          },
+        );
+
+        if (cancelled) {
+          detector?.dispose?.();
+          return;
+        }
+
+        faceDetectorRef.current = detector;
         setAsciiArt("Model loaded! Click START CAMERA to begin.");
-        console.log("Model loaded successfully");
+        console.log("Face detector loaded successfully");
       } catch (error) {
-        console.error("Failed to load model:", error);
+        console.error("Failed to load face detector:", error);
         setAsciiArt("Error loading AI model. Check console.");
       }
     };
 
+    const loadHandDetector = async () => {
+      try {
+        const detector = await handPoseDetection.createDetector(
+          handPoseDetection.SupportedModels.MediaPipeHands,
+          {
+            runtime: "tfjs",
+            modelType: "full",
+          },
+        );
+
+        handDetectorRef.current = detector;
+      } catch (error) {
+        console.error("Failed to load hand detector:", error);
+      }
+    };
+
     loadModel();
-    return stopCamera;
+    loadHandDetector();
+    return () => {
+      cancelled = true;
+      stopCamera();
+      faceDetectorRef.current?.dispose?.();
+      faceDetectorRef.current = null;
+      handDetectorRef.current?.dispose?.();
+      handDetectorRef.current = null;
+    };
   }, []);
 
   return (
