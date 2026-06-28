@@ -3,7 +3,7 @@ import * as tf from "@tensorflow/tfjs";
 import * as faceLandmarksDetection from "@tensorflow-models/face-landmarks-detection";
 import * as handPoseDetection from "@tensorflow-models/hand-pose-detection";
 
-const ASCII_PALETTE = "@#S%?*+;:,. ";
+const ASCII_PALETTE = "@%#*+=-:.,";
 const TARGET_COLUMNS = 200;
 
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
@@ -54,6 +54,31 @@ const createExpandedRegion = (points, width, height, paddingRatio) => {
     clamp(bounds.maxX + paddingX, 0, width - 1),
     clamp(bounds.maxY + paddingY, 0, height - 1),
   );
+};
+
+const createRegionFromDetection = (detection, width, height, paddingRatio) => {
+  if (detection?.box) {
+    const { box } = detection;
+    const paddingX = Math.max(36, box.width * paddingRatio);
+    const paddingY = Math.max(36, box.height * paddingRatio);
+
+    return createBoxPolygon(
+      clamp(box.xMin - paddingX, 0, width - 1),
+      clamp(box.yMin - paddingY, 0, height - 1),
+      clamp(box.xMax + paddingX, 0, width - 1),
+      clamp(box.yMax + paddingY, 0, height - 1),
+    );
+  }
+
+  if (detection?.keypoints) {
+    const points = detection.keypoints.filter(
+      (keypoint) => Number.isFinite(keypoint.x) && Number.isFinite(keypoint.y),
+    );
+
+    return createExpandedRegion(points, width, height, paddingRatio);
+  }
+
+  return null;
 };
 
 const buildConvexHull = (points) => {
@@ -312,11 +337,7 @@ export default function App() {
         });
 
         for (const face of faces) {
-          const facePoints = face.keypoints.filter(
-            (keypoint) => Number.isFinite(keypoint.x) && Number.isFinite(keypoint.y),
-          );
-
-          const faceRegion = createExpandedRegion(facePoints, videoWidth, videoHeight, 0.6);
+          const faceRegion = createRegionFromDetection(face, videoWidth, videoHeight, 0.85);
 
           if (faceRegion) {
             facePolygons.push(faceRegion);
@@ -328,11 +349,7 @@ export default function App() {
         const hands = await handDetector.estimateHands(video);
 
         for (const hand of hands) {
-          const handPoints = hand.keypoints.filter(
-            (keypoint) => Number.isFinite(keypoint.x) && Number.isFinite(keypoint.y),
-          );
-
-          const handRegion = createExpandedRegion(handPoints, videoWidth, videoHeight, 0.45);
+          const handRegion = createRegionFromDetection(hand, videoWidth, videoHeight, 0.7);
 
           if (handRegion) {
             handPolygons.push(handRegion);
