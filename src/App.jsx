@@ -148,6 +148,9 @@ export default function App() {
   const streamRef = useRef(null);
   const frameRef = useRef(0);
   const isProcessingRef = useRef(false);
+  const cameraActiveRef = useRef(false);
+  const cameraSessionRef = useRef(0);
+  const isCameraStartingRef = useRef(false);
   const faceDetectorRef = useRef(null);
   const handDetectorRef = useRef(null);
   const lastAsciiRef = useRef("");
@@ -155,7 +158,10 @@ export default function App() {
   const [cameraError, setCameraError] = useState("");
   const [asciiArt, setAsciiArt] = useState("Loading AI model...");
 
-  const stopCamera = () => {
+  const releaseCamera = () => {
+    cameraActiveRef.current = false;
+    cameraSessionRef.current += 1;
+
     if (frameRef.current) {
       cancelAnimationFrame(frameRef.current);
       frameRef.current = 0;
@@ -167,10 +173,15 @@ export default function App() {
     }
 
     if (videoRef.current) {
+      videoRef.current.pause();
       videoRef.current.srcObject = null;
     }
+  };
 
+  const stopCamera = () => {
+    releaseCamera();
     setCameraState("idle");
+    setCameraError("");
     setAsciiArt("Camera stopped. Start Again.");
     lastAsciiRef.current = "";
   };
@@ -290,19 +301,23 @@ export default function App() {
     }, "image/png");
   };
 
-  const renderAsciiFrame = async () => {
+  const renderAsciiFrame = async (sessionId = cameraSessionRef.current) => {
+    if (!cameraActiveRef.current || sessionId !== cameraSessionRef.current) {
+      return;
+    }
+
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const faceDetector = faceDetectorRef.current;
     const handDetector = handDetectorRef.current;
 
-    if (!video || !canvas || video.readyState < 2 || (!faceDetector && !handDetector)) {
-      frameRef.current = requestAnimationFrame(renderAsciiFrame);
+    if (!video || !canvas || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+      frameRef.current = requestAnimationFrame(() => renderAsciiFrame(sessionId));
       return;
     }
 
     if (isProcessingRef.current) {
-      frameRef.current = requestAnimationFrame(renderAsciiFrame);
+      frameRef.current = requestAnimationFrame(() => renderAsciiFrame(sessionId));
       return;
     }
 
@@ -311,14 +326,16 @@ export default function App() {
 
     if (!context) {
       isProcessingRef.current = false;
-      frameRef.current = requestAnimationFrame(renderAsciiFrame);
+      frameRef.current = requestAnimationFrame(() => renderAsciiFrame(sessionId));
       return;
     }
 
     const targetColumns = TARGET_COLUMNS;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
 
     context.drawImage(video, 0, 0);
     const fullPixelData = context.getImageData(0, 0, video.videoWidth, video.videoHeight).data;
@@ -357,6 +374,12 @@ export default function App() {
         }
       }
       
+      if (!cameraActiveRef.current || sessionId !== cameraSessionRef.current) {
+        return;
+      }
+
+      const hasDetections = facePolygons.length > 0 || handPolygons.length > 0;
+
       // Calculate rows based on fixed columns and camera aspect ratio
       const targetRows = Math.round(targetColumns * aspectRatio * 0.5);
 
@@ -374,7 +397,9 @@ export default function App() {
 
           const isFacePixel = facePolygons.some((polygon) => isPointInPolygon(videoCol, videoRow, polygon));
           const isHandPixel = handPolygons.some((polygon) => isPointInPolygon(videoCol, videoRow, polygon));
-          const isHumanPixel = isFacePixel || isHandPixel;
+          // If detection is unavailable or temporarily loses the subject, keep the camera useful
+          // by rendering the full frame instead of showing a blank screen.
+          const isHumanPixel = !hasDetections || isFacePixel || isHandPixel;
 
           if (isHumanPixel) personPixelCount += 1;
 
@@ -410,100 +435,147 @@ export default function App() {
       isProcessingRef.current = false;
     }
 
-    frameRef.current = requestAnimationFrame(renderAsciiFrame);
+    frameRef.current = requestAnimationFrame(() => renderAsciiFrame(sessionId));
   };
 
   const startCamera = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError("This browser does not support live camera access.");
-      setCameraState("unsupported");
+    if (isCameraStartingRef.current) {
       return;
     }
+
+    isCameraStartingRef.current = true;
+    releaseCamera();
 
     try {
       setCameraError("");
       setCameraState("starting");
 
+      if (!window.isSecureContext) {
+        throw new Error("Camera access requires a secure connection. Open ByteME over HTTPS or localhost.");
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("This browser does not support camera access. Try the latest version of Chrome, Safari, or Firefox.");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: "user",
+          facingMode: { ideal: "user" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
       });
 
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+      const video = videoRef.current;
+      if (!video) {
+        throw new Error("The camera preview could not be initialized. Please reload the page.");
       }
 
+      video.srcObject = stream;
+      await video.play();
+
+      cameraActiveRef.current = true;
       setCameraState("live");
-      setAsciiArt("");
-      frameRef.current = requestAnimationFrame(renderAsciiFrame);
+      setCameraError("");
+      setAsciiArt("Camera connected. Preparing your ASCII portrait...");
+
+      const sessionId = cameraSessionRef.current;
+      frameRef.current = requestAnimationFrame(() => renderAsciiFrame(sessionId));
     } catch (error) {
+      releaseCamera();
+
+      const messages = {
+        NotAllowedError: "Camera permission was denied. Allow camera access for this site in your browser settings, then try again.",
+        NotFoundError: "No camera was found. Connect or enable a camera and try again.",
+        NotReadableError: "Your camera is already in use or could not be started. Close other apps using it and try again.",
+        OverconstrainedError: "The selected camera does not support the requested settings. Try another camera.",
+        SecurityError: "Camera access is blocked by the browser. Open ByteME over HTTPS or localhost.",
+        AbortError: "The camera start was interrupted. Please try again.",
+      };
+
       setCameraState("error");
-      setCameraError(
-        error instanceof Error
-          ? error.message
-          : "Camera access was blocked or could not be started.",
-      );
-      stopCamera();
+      setCameraError(messages[error?.name] || error?.message || "Camera access could not be started. Check your browser permissions and try again.");
+      setAsciiArt("Camera unavailable. Check the message below and try again.");
+      console.error("Camera start failed:", error);
+    } finally {
+      isCameraStartingRef.current = false;
     }
   };
 
   useEffect(() => {
     let cancelled = false;
 
-    const loadModel = async () => {
+    const loadModels = async () => {
       try {
-        await tf.setBackend("webgl");
+        try {
+          const webglAvailable = await tf.setBackend("webgl");
+          if (!webglAvailable) {
+            await tf.setBackend("cpu");
+          }
+        } catch {
+          await tf.setBackend("cpu");
+        }
+
         await tf.ready();
 
-        console.log("Loading face-landmarks detector...");
-        const detector = await faceLandmarksDetection.createDetector(
-          faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
-          {
-            runtime: "tfjs",
-            refineLandmarks: true,
-          },
-        );
+        const [faceResult, handResult] = await Promise.allSettled([
+          faceLandmarksDetection.createDetector(
+            faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+            {
+              runtime: "tfjs",
+              refineLandmarks: true,
+            },
+          ),
+          handPoseDetection.createDetector(
+            handPoseDetection.SupportedModels.MediaPipeHands,
+            {
+              runtime: "tfjs",
+              modelType: "full",
+            },
+          ),
+        ]);
 
         if (cancelled) {
-          detector?.dispose?.();
+          if (faceResult.status === "fulfilled") faceResult.value?.dispose?.();
+          if (handResult.status === "fulfilled") handResult.value?.dispose?.();
           return;
         }
 
-        faceDetectorRef.current = detector;
-        setAsciiArt("Model loaded! Click START CAMERA to begin.");
-        console.log("Face detector loaded successfully");
+        if (faceResult.status === "fulfilled") {
+          faceDetectorRef.current = faceResult.value;
+          console.log("Face detector loaded successfully");
+        } else {
+          console.error("Failed to load face detector:", faceResult.reason);
+        }
+
+        if (handResult.status === "fulfilled") {
+          handDetectorRef.current = handResult.value;
+          console.log("Hand detector loaded successfully");
+        } else {
+          console.error("Failed to load hand detector:", handResult.reason);
+        }
+
+        if (faceDetectorRef.current || handDetectorRef.current) {
+          setAsciiArt("AI models ready. Click START CAMERA to begin.");
+        } else {
+          setAsciiArt("AI detection is unavailable. The camera can still render a full-frame ASCII image.");
+        }
       } catch (error) {
-        console.error("Failed to load face detector:", error);
-        setAsciiArt("Error loading AI model. Check console.");
+        console.error("Failed to initialize camera models:", error);
+        if (!cancelled) {
+          setAsciiArt("AI models could not load. The camera can still render a full-frame ASCII image.");
+        }
       }
     };
 
-    const loadHandDetector = async () => {
-      try {
-        const detector = await handPoseDetection.createDetector(
-          handPoseDetection.SupportedModels.MediaPipeHands,
-          {
-            runtime: "tfjs",
-            modelType: "full",
-          },
-        );
+    loadModels();
 
-        handDetectorRef.current = detector;
-      } catch (error) {
-        console.error("Failed to load hand detector:", error);
-      }
-    };
-
-    loadModel();
-    loadHandDetector();
     return () => {
       cancelled = true;
-      stopCamera();
+      releaseCamera();
       faceDetectorRef.current?.dispose?.();
       faceDetectorRef.current = null;
       handDetectorRef.current?.dispose?.();
@@ -528,8 +600,8 @@ export default function App() {
           </div>
 
           <div className="camera-actions">
-            <button className="button primary" type="button" onClick={startCamera}>
-              {cameraState === "live" ? "Restart" : "Start camera"}
+            <button className="button primary" type="button" onClick={startCamera} disabled={cameraState === "starting"}>
+              {cameraState === "starting" ? "Starting..." : cameraState === "live" ? "Restart" : "Start camera"}
             </button>
             {cameraState === "live" && (
               <button className="button secondary" type="button" onClick={stopCamera}>
