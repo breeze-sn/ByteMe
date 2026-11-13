@@ -374,6 +374,10 @@ export default function App() {
         }
       }
       
+      if (!cameraActiveRef.current || sessionId !== cameraSessionRef.current) {
+        return;
+      }
+
       const hasDetections = facePolygons.length > 0 || handPolygons.length > 0;
 
       // Calculate rows based on fixed columns and camera aspect ratio
